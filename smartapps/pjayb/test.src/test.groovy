@@ -25,18 +25,29 @@ definition(
 
 
 preferences {
-    section("When all of these people leave home") {
-        input "people", "capability.presenceSensor", multiple: true, title: "Which people?"
+    section("Allow unofficial SmartThings apps access to these Actuators:") {
+    	input "actuators", "capability.actuator", multiple: true, required: false
     }
-    section("Check this sensor") {
-		input "thesensor", "capability.contactSensor", required: true, title: "What?" 
-	}
-    section("Send Push Notification?") {
-        input "sendPush", "bool", required: false,
-              title: "Send Push Notification if open?"
+    section("Allow unofficial SmartThings apps access to these Sensors:") {
+    	input "sensors", "capability.sensor", multiple: true, required: false
     }
-    section("Send a text message to this number (optional)") {
-        input "phone", "phone", required: false
+}
+
+mappings {
+	path("/sensors") {
+    	action: [
+        	GET: "listSensors"
+        ]
+    }
+	path("/actuators") {
+    	action: [
+        	GET: "listActuators"
+        ]
+    }
+    path("/actuate/:id/:command") {
+    	action: [
+        	PUT: "updateActuator"
+        ]
     }
 }
 
@@ -55,79 +66,110 @@ def updated() {
 
 def initialize() {
     log.debug "Installed with settings: ${settings}"
-    log.debug "Current mode = ${location.mode}, people = ${people.collect{it.label + ': ' + it.currentPresence}}"
-    subscribe(people, "presence", presence)
-//	subscribe(thesensor, "contact.open", contactHandler)
 }
 
-def presence(evt) {
-	if (!thesensor) {
-    	log.debug "No sensor specified: ignoring"
+// returns a list of JSON key value pairs representing the current things and their capabilities
+private listThings(things) {
+	def response = []
+    things.each {thing ->
+    	def capabilities = []
+        thing.capabilities.each {capability ->
+        	//def attributes = []
+           	//capability.attributes.each {attribute -> 
+            //	attributes << [name: attribute.name, dataType: attribute.dataType, values: attribute.values]
+            //}
+            //def commands = []
+            //capability.commands.each {command ->
+           	//	def arguments = []
+            //    command.arguments.each { arg ->
+            //    	arguments << arg
+            //    }
+            //	commands << [name: command.name, arguments: arguments]
+            //}
+        	capabilities << capability.name //, attributes: attributes, commands: commands]
+        }
+        def supportedAttributes = []
+        thing.supportedAttributes.each {attribute ->
+           	supportedAttributes << [name: attribute.name, dataType: attribute.dataType, values: attribute.values]
+        }
+        def supportedCommands = []
+        thing.supportedCommands.each {command ->
+            def arguments = []
+            command.arguments.each { arg ->
+                arguments << arg
+            }
+            supportedCommands << [name: command.name, arguments: arguments]
+        }
+    	response << [
+        	id: thing.id,
+        	name: thing.name,
+            displayName: thing.displayName, 
+            capabilities: capabilities, 
+            supportedAttributes: supportedAttributes, 
+            supportedCommands: supportedCommands]
+    }
+    return response
+}
+
+
+// returns a list of JSON key value pairs representing the current sensors
+// e.g. [[name: "Kitchen lamp", value: "off"], [name: "Downstairs hallway", value: "on"]]
+def listSensors() {
+	log.debug "Query for sensors received..."
+
+	return listThings(sensors)
+}
+
+def listActuators() {
+	log.debug "Query for actuators received..."
+
+	return listThings(actuators)
+}
+
+
+def updateActuator() {
+	log.debug "Put command received"
+
+	// Get the ":id" and ":command" parameters
+    def id = params.id
+	def command = params.command
+
+	log.debug "... Command for ${id}: ${command}"
+    
+    // Get the device
+    def target = null
+    actuators.each {actuator ->
+    	if (actuator.id == id) {
+        	target = actuator
+        }
+    }
+    
+    if (target == null) {
+    	httpError(400, "$id is not a recognized device")
+        return
+    }
+    
+    if (!target.hasCommand(command)) {
+    	httpError(400, "${target.displayName} does not support '${command}'")
         return
     }
 
-    log.debug "evt.name: $evt.value"
-    if (evt.value == "not present") {
-        if (location.mode != newMode) {
-            log.debug "checking if everyone is away"
-            if (everyoneIsAway()) {
-                log.debug "starting sequence"
-                
-                def contactState = thesensor.contactState?.value
-            	log.debug "${thesensor.displayName} is ${contactState}"    
-			                
-                if (contactState == "open") {
-                	def message = "${thesensor.displayName} is ${contactState}"
-                  	if (sendPush) {
-                    	log.debug "Sending Push Notification"
-                  		sendPush(message)
-                    } else {
-                    	log.debug "Push notifications are disabled"
-                    }
-                    if (phone) {
-                    	log.debug "Sending SMS"
-                    	sendSms(message)
-                    } else {
-                    	log.debug "SMS notifications are disabled"
-                    }
-                }
-            }
-        }
-        else {
-            log.debug "mode is the same, not evaluating"
+	// TODO: pass function parameters!
+    def func = null
+    target.supportedCommands.each {cmd ->
+    	if (cmd.name == command) {
+        	func = cmd
         }
     }
-    else {
-        log.debug "present; doing nothing"
-    }
+    
+    if (func == null) {
+    	httpError(400, "${target.displayName} does not support '${command}'")
+        return
+    }   	
+    
+    log.debug "Executing '${func.name}' on ${target.displayName}"
+    //def evt = [name: command]
+    //sendEvent(target, evt)
+    target.("${command}")()
 }
 
-// returns true if all configured sensors are not present,
-// false otherwise.
-private everyoneIsAway() {
-    def result = true
-    // iterate over our people variable that we defined
-    // in the preferences method
-    for (person in people) {
-        if (person.currentPresence == "present") {
-            // someone is present, so set our our result
-            // variable to false and terminate the loop.
-            result = false
-            break
-        }
-    }
-    log.debug "everyoneIsAway: $result"
-    return result
-}
-
-//def contactHandler(evt) {
-//    log.debug "Contact is in ${evt.value} state"
-//    
-//    def message = "${thesensor.displayName} is ${thesensor.contactState.value}"
-//    if (sendPush) {
-//        sendPush(message)
-//    }
-//    if (phone) {
-//        sendSms(phone, message)
-//    }
-//}
